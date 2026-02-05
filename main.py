@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
 import os
@@ -7,20 +7,19 @@ import requests
 
 app = FastAPI()
 
-# 🔐 API Key from environment variable (Render)
+# 🔐 API Key (set in Render dashboard as environment variable)
 API_KEY = os.getenv("API_KEY")
 
 # 🧠 In-memory session storage
 sessions = {}
 
 # -----------------------------
-# 📦 Request Models (IMPORTANT)
+# 📦 Request Models
 # -----------------------------
-
 class Message(BaseModel):
     sender: str
     text: str
-    timestamp: int  # epoch ms (GUVI sends number)
+    timestamp: int  # epoch ms
 
 class HistoryMessage(BaseModel):
     sender: str
@@ -41,10 +40,10 @@ class HoneypotRequest(BaseModel):
 # -----------------------------
 # 🚀 Honeypot Endpoint
 # -----------------------------
-
 @app.post("/honeypot")
 def honeypot(
     data: HoneypotRequest,
+    background_tasks: BackgroundTasks,
     x_api_key: str = Header(None)
 ):
     # 🔐 API key validation
@@ -69,7 +68,7 @@ def honeypot(
             }
         }
 
-    # 📝 Store message
+    # 📝 Store incoming message
     sessions[session_id]["messages"].append(data.message.text)
 
     # 🚨 Scam detection
@@ -93,13 +92,13 @@ def honeypot(
     sessions[session_id]["intelligence"]["phishingLinks"].extend(url_matches)
     sessions[session_id]["intelligence"]["phoneNumbers"].extend(phone_matches)
 
-    # 🤖 Agent reply (human-like, non-revealing)
+    # 🤖 Agent reply
     if sessions[session_id]["scamDetected"]:
         reply = "Why is my account being blocked? Can you explain clearly?"
     else:
         reply = "Sorry, I didn’t understand. Can you please explain?"
 
-    # 📡 FINAL CALLBACK TO GUVI (MANDATORY)
+    # 📡 FINAL CALLBACK TO GUVI (run in background)
     if (
         sessions[session_id]["scamDetected"]
         and not sessions[session_id]["finalReported"]
@@ -113,21 +112,23 @@ def honeypot(
             "agentNotes": "Scammer used urgency and account suspension tactics"
         }
 
-        # 🔍 Print for your visibility
-        print("🚨 Sending final GUVI payload:")
-        print(payload)
+        def send_final_callback(payload):
+            try:
+                print("🚨 Sending final GUVI payload:")
+                print(payload)
+                requests.post(
+                    "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",
+                    json=payload,
+                    timeout=5
+                )
+                sessions[session_id]["finalReported"] = True
+            except Exception as e:
+                print("❌ Callback failed:", e)
 
-        try:
-            requests.post(
-                "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",
-                json=payload,
-                timeout=5
-            )
-            sessions[session_id]["finalReported"] = True
-        except Exception as e:
-            print("❌ Callback failed:", e)
+        # Add background task
+        background_tasks.add_task(send_final_callback, payload)
 
-    # ✅ API response
+    # ✅ Return API response immediately
     return {
         "status": "success",
         "reply": reply
